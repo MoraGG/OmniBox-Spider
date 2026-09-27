@@ -2,7 +2,7 @@
 // @author 
 // @description 关注直播间由环境变量 DOUYU_FOLLOWED_ROOMS 配置（逗号分隔房间号，可写 房间号:备注名）
 // @dependencies: axios, crypto-js
-// @version 1.1.0
+// @version 1.2.0
 // @downloadURL https://gh-proxy.org/https://github.com/MoraGG/OmniBox-Spider/raw/refs/heads/main/直播/斗鱼直播.js
 
 /**
@@ -13,6 +13,14 @@
  *   - 例：DOUYU_FOLLOWED_ROOMS=3484,7546,660002
  *   - 支持备注名：DOUYU_FOLLOWED_ROOMS=3484:SCBOY,7546:Macsed
  *   - 不配置时回退到 DEFAULT_FOLLOWED_ROOMS
+ *
+ * v1.2.0：修复「直播只能播 30 多秒就停」
+ *   - 原因：play() 返回了 header，OmniBox 前端会据此把播放地址包装成
+ *     /api/spider-source/proxy-play?url=...，而后端代理对单个请求有 30 秒硬超时，
+ *     到点即切断 HTTP-FLV 长连接（实测 30.00s 精确复现），前端 flv.js 又无自动重连。
+ *   - 修复：默认不再返回 header，让播放器直连 CDN（斗鱼 CDN 已开启
+ *     Access-Control-Allow-Origin: *，跨域可直接播）；需要走代理时设
+ *     DOUYU_PLAY_VIA_PROXY=1 回退旧行为。
  * ============================================================================
  */
 const axios = require("axios");
@@ -393,15 +401,29 @@ async function play(params) {
     
     const final_url = `${streamData.data.rtmp_url}/${streamData.data.rtmp_live}`;
     logInfo(`最终播放地址: ${final_url}`);
-    
-    return {
+
+    // ========== 播放方式（环境变量控制）==========
+    // 默认：不返回 header —— OmniBox 前端只有在 header 非空时才会把地址包装成
+    //        /api/spider-source/proxy-play?url=...，而后端代理对单个请求有 30 秒硬超时，
+    //        HTTP-FLV 是长连接直播流，必然在 30 秒被切断（实测 30.0014/30.0020/30.0016s）。
+    //        不返回 header 时前端直接使用该地址，flv.js 直连斗鱼 CDN；
+    //        斗鱼 CDN 已返回 Access-Control-Allow-Origin: *，跨域可直接播放。
+    // 回退：DOUYU_PLAY_VIA_PROXY=1 时保留旧行为（带 header 走 OmniBox 代理，会 30 秒断流）。
+    const viaProxy = /^(1|true|yes|on)$/i.test(String(process.env.DOUYU_PLAY_VIA_PROXY || "").trim());
+    const result = {
       urls: [{ name: "斗鱼直播", url: final_url }],
-      parse: 0,
-      header: {
+      parse: 0
+    };
+    if (viaProxy) {
+      result.header = {
         'User-Agent': 'Mozilla/5.0',
         'Referer': 'https://www.douyu.com/'
-      }
-    };
+      };
+      logInfo("播放方式：经 OmniBox 代理（DOUYU_PLAY_VIA_PROXY=1，注意 30 秒断流限制）");
+    } else {
+      logInfo("播放方式：直连斗鱼 CDN（不返回 header，绕过 OmniBox 代理 30 秒超时）");
+    }
+    return result;
   } catch (e) {
     logError("播放地址解析失败", e);
     return { 
